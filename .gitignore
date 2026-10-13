@@ -18,7 +18,6 @@
 
 /docs/*
 !/docs/model_results.json
-!/docs/publication-files.txt
 
 __pycache__/
 *.py[cod]

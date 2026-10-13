@@ -119,8 +119,7 @@ evaluation requests; public ground truth is read after prediction export.
 
 Data preparation uses ordinary DataFrames. The only class, `ItineraryGRU`, defines
 the PyTorch network. Folds and scaling use scikit-learn; sparse matrices, softmax
-and optimization use SciPy. The [publication list](docs/publication-files.txt) contains
-ten files; raw data, weights and historical experiments stay local.
+and optimization use SciPy. Raw data, weights and historical experiments stay local.
 
 ```bash
 conda env create -f environment.yml
