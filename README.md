@@ -1,13 +1,19 @@
-# Hybrid itinerary recommender
+# Itinerary Signals — a hybrid sequence recommender
 
-Recommend **four possible final cities for a multi-stop hotel trip**, using its
-observed itinerary and the context available for the final reservation. The task
-uses the anonymized Booking.com Multi-Destination Trips dataset.
+How can a sequence of observed actions help rank what might be useful next?
+This project studies that question through a concrete task: recommend four
+possible final cities for a hotel trip from its earlier stays and permitted
+reservation context.
 
-The best model combines seven statistical experts with a GRU sequence model.
-A learned blending gate adjusts their contributions for each trip.
+The work develops a methodology for combining **interpretable behavioural
+evidence, learned sequence representations and evaluation that separates users**.
+A lag-based recommender becomes a blend of seven statistical experts, then a
+hybrid with a GRU. Each layer addresses an explicit modelling question, and its
+combined contribution is checked against the preceding reference.
 
-**Public HitRate@4: 51.73% · NDCG@4: 42.00% · 70,662 trips.**
+The Booking.com experiment provides offline evidence for those decisions.
+Possible commercial applications require their own targets, data and validation;
+they are outlined below as hypotheses to investigate.
 
 ## Task and data
 
@@ -28,6 +34,11 @@ with target `D`. The observed part is called the **prefix**. The model scores
 all cities in its fitting catalogue and returns four distinct suggestions.
 A previously visited city remains eligible: trips can end where they started.
 
+Preparation excludes complete trips with invalid IDs, invalid dates or durations,
+conflicting users, or tied check-ins. Single-stay trips contribute fitting
+evidence but cannot supply a supervised prefix/endpoint pair. Repeated visits
+within a valid trip remain intact.
+
 The benchmark conceals the last reservation's city and hotel country, but keeps
 some final-row context. The model uses its **booker country, device, affiliate,
 check-in month, weekday and stay duration**. Training reproduces that same
@@ -40,32 +51,34 @@ feedback**: an observed destination is a training outcome, while an unobserved
 city does not establish a traveler's dislike. Anonymous city IDs are categorical;
 the model learns their relationships from travel behavior.
 
-## Recommendation process
+## Methodology: what each layer is for
 
-1. **Split users and prepare trips.** Hold out 20% of users for development
-   evaluation. Within each partition, order stays and exclude complete trips
-   with invalid IDs, invalid dates or durations, conflicting users, or tied
-   check-ins. Keeping the whole trip together avoids constructing an artificial
-   itinerary by dropping individual bad stays.
-2. **Build one endpoint example per eligible trip.** Separate the last city from
-   all earlier stays, retaining the full prefix, repeated visits and allowed
-   final-row context. Single-stay trips contribute fitting evidence but cannot
-   provide a supervised prefix/endpoint pair.
-3. **Estimate seven statistical distributions.** Learn route patterns, city
-   roles, endpoint frequencies, return probabilities and context corrections
-   from fitting users. Smooth count estimates toward broader priors so limited
-   observations do not produce extreme probabilities.
-4. **Train the GRU on complete prefixes.** Encode cities, countries and durations,
-   read the ordered stays, and combine the sequence representation with context
-   and trip summaries. Predict the true endpoint with a city softmax.
-5. **Learn how to combine the models.** Use three inner user folds: fit the
-   statistical experts and GRU on two folds and score users in the third. These
-   out-of-fold predictions train the blending gate. Refit the experts and GRU
-   on all fitting users before evaluating the resulting recommender.
-6. **Rank and evaluate.** Combine the eight probability distributions, rank the
-   complete fitting catalogue and export four cities per trip. Evaluate the
-   exported lists against the hidden endpoints; public ground truth is opened
-   only after prediction export.
+1. **Define the decision and information boundary.** Build one example per true
+   endpoint, with the same visible history and context at training and prediction.
+   Separate users before preparing the fitting and development partitions.
+   The target is a recorded destination; a useful travel recommendation is a
+   broader product objective that this label only approximates.
+2. **Establish an interpretable behavioural reference.** Use directed later-stay
+   counts from every prefix city, with lag buckets and recency weights. This
+   makes the predictive value of historical route evidence measurable before
+   adding a neural representation.
+3. **Represent different roles and interactions.** Add endpoint, origin,
+   recent-route, return and context experts. Distinguish how often an event
+   occurs from the role it plays in a journey. Smooth estimates toward broader
+   priors, and retain counts that describe their evidence strength.
+4. **Learn relationships beyond the specified count tables.** A GRU reads the
+   entire ordered prefix through categorical embeddings. Explicit first, last
+   and penultimate stay vectors preserve access to useful positions. Shared
+   input/output city embeddings connect history representation to destination
+   scoring.
+5. **Combine signals according to available evidence.** A regularised gate uses
+   support and agreement features to weight the experts for each trip. Train
+   it on predictions from three held-user folds, then refit the experts on all
+   fitting users. This is stacking with a fixed minimum contribution from lag.
+6. **Evaluate the added layer against its reference.** Compare the same held-out
+   requests, rank the full fitting catalogue and assess both inclusion and rank.
+   Report paired uncertainty. Public labels are read after prediction export;
+   candidate sampling and target injection do not simplify the evaluation.
 
 ## Model architecture and decisions
 
@@ -156,13 +169,15 @@ Two metrics assess the four-city lists:
 - **NDCG@4:** gives more credit when that endpoint ranks earlier. With one relevant
   city, the score is `1 / log2(rank + 1)` for a hit and zero otherwise.
 
-The **endpoint reference** is the seven-expert statistical blend, providing a
-baseline for the contribution of the GRU.
+The comparisons show how the combined designs behave as layers are added.
+Development contains 43,647 held-user trips; the public benchmark contains
+70,662 trips.
 
-| Population | Trips | Endpoint reference HitRate@4 | GRU blend HitRate@4 |
-|---|---:|---:|---:|
-| Development, held-out users | 43,647 | 49.18% | **50.37%** |
-| Public benchmark | 70,662 | 50.52% | **51.73%** |
+| Model | What it adds | Development HitRate@4 | Public HitRate@4 |
+|---|---|---:|---:|
+| Lag reference | Full-prefix later-stay evidence and recency | 47.20% | 48.39% |
+| Statistical blend | Seven role, route, return and context experts with an adaptive gate | 49.18% | 50.52% |
+| GRU hybrid | Learned sequence representation in the same blending framework | 50.37% | 51.73% |
 
 The GRU blend achieves public **NDCG@4 of 42.00%** and hits **36,553 targets**,
 adding **854 hits (+1.21 percentage points)** over the endpoint reference.
@@ -170,11 +185,45 @@ The exploratory 95% gain interval is **[+1.03, +1.40] pp**, from 2,000 paired
 user-cluster bootstrap resamples (seed 42). Resampling whole users preserves
 within-user dependence when comparing the two models.
 
+This is an incremental improvement in endpoint reconstruction. The comparisons
+support testing complementary count and neural representations on this dataset;
+they do not isolate the value of every feature or expert. Mean gate weights
+describe model behaviour, not causal attribution. Individual components would
+need ablations before claiming that each earns its complexity.
+
 These scores come from the original full training run. Public labels were
 previously inspected, so the benchmark is descriptive rather than an independent
 test or official challenge placing. The task measures recovery of a recorded
 endpoint. Anonymous city IDs provide no distances, and the dataset supplies no
 availability information; offline accuracy does not establish online usefulness.
+
+## From the experiment to application hypotheses
+
+The reusable element is the design process: define a decision, preserve its
+information boundary, identify behavioural roles, learn sequence relationships,
+combine evidence and evaluate against a meaningful reference. The trained city
+model and its measured scores are specific to this dataset.
+
+A travel-planning product could investigate whether this approach helps users
+find feasible next stops. It would need geography, dates, live inventory and
+eligibility constraints, and training context that is actually available at the
+moment of recommendation. Finding a recorded endpoint is only a proxy for helping
+someone plan a satisfactory trip.
+
+Other settings suggest testable hypotheses:
+
+| Setting | Recommendation hypothesis | Evidence needed for useful deployment |
+|---|---|---|
+| Product discovery | Combine complementary-item, replenishment and session-sequence signals to rank eligible products. | Views, baskets, purchases and recommendation exposures; stock and compatibility constraints; a controlled test of useful purchases and returns. |
+| Knowledge work | Combine document roles, revisits and task-session sequences to suggest the next useful resource. | Search and document-use sequences linked to tasks; permissions and freshness; relevance judgements and task-completion measures. |
+| Learning resources | Combine topic progression, revision patterns and sequence representations to suggest suitable next practice. | Attempts, prerequisites and progress measures; appropriate content eligibility; evidence of learning progress rather than clicks alone. |
+
+These applications have not been evaluated here. Each needs a new target and
+catalogue, domain-specific baselines, and a split that reflects intended use,
+including later-period evaluation where appropriate. Exposure logs matter:
+observed actions depend on what users had the opportunity to see. Offline ranking
+can screen designs; a controlled online comparison is needed to estimate changes
+in user outcomes and business value.
 
 ## Code and local execution
 
@@ -247,3 +296,9 @@ SIGIR 2021 ([paper](https://doi.org/10.1145/3404835.3463240),
 [official data and terms](https://github.com/bookingcom/ml-dataset-mdt)).
 The neural city head and GRU adapt ideas from
 [NVIDIA's challenge solution](https://ceur-ws.org/Vol-2855/challenge_short_2.pdf).
+
+## License
+
+The original code and documentation in this repository are licensed under
+[MIT](LICENSE). Booking.com's dataset is not covered by this license; obtain it
+from the source above and follow its separate terms.
