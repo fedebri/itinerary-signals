@@ -6,7 +6,6 @@
 !/Makefile
 !/pipeline/
 !/tests/
-!/docs/
 
 /pipeline/*
 !/pipeline/data_features.py
@@ -15,9 +14,6 @@
 
 /tests/*
 !/tests/test_recommender.py
-
-/docs/*
-!/docs/model_results.json
 
 __pycache__/
 *.py[cod]

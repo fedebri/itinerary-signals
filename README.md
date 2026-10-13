@@ -94,8 +94,8 @@ and 1.64% across the remaining experts.
 
 The GRU blend hits **36,553 public targets**, adding **854 hits (+1.21 percentage
 points)** over the endpoint reference. The paired exploratory 95% gain interval
-is **[+1.03, +1.40] pp**. Exact scores and provenance are in
-[model_results.json](docs/model_results.json).
+is **[+1.03, +1.40] pp**, estimated with 2,000 paired user-cluster bootstrap
+resamples (seed 42). These scores come from the original full training run.
 
 Public labels were previously inspected; these scores are descriptive, not an
 independent test or official challenge placing. Anonymous cities lack distances and availability information;
