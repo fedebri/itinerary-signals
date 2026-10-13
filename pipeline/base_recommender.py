@@ -92,6 +92,8 @@ def fit_experts(events, requests, labels):
     ).dropna()
     source_support = transitions.groupby("source").size()
     shape = (len(catalog), len(catalog))
+    # Sparse city-by-city matrices avoid allocating a dense catalogue square.
+    # Bucket 4 pools every separation of four stays or more.
     lag_counts = {k: csr_matrix(shape, dtype=np.float32) for k in (1, 2, 3, 4)}
     maximum = int(events.groupby("utrip_id").size().max())
     for lag in range(1, maximum):
@@ -116,6 +118,8 @@ def fit_experts(events, requests, labels):
     # Terminal, origin and recent-route experts all learn true trip endpoints.
     start_counts = np.bincount(starts, minlength=len(catalog))
     end_counts = np.bincount(targets, minlength=len(catalog))
+    # Ten pseudo-observations from overall booking popularity give rare
+    # endpoint cities a defined probability without erasing observed counts.
     terminal = (end_counts + 10 * prior) / (len(fitting) + 10)
     origin_counts = csr_matrix((np.ones(len(fitting)), (starts, targets)), shape=shape)
     pairs = fitting.loc[fitting["city_history"].str.len().ge(2)]
@@ -133,6 +137,7 @@ def fit_experts(events, requests, labels):
         ),
         shape=(len(pair_keys), len(catalog)),
     )
+    # A city visited twice is one return opportunity for this trip, not two.
     visits = fitting.assign(
         visited_city=fitting["city_history"].map(
             lambda history: list(dict.fromkeys(history))
@@ -183,6 +188,8 @@ def fit_experts(events, requests, labels):
             shape=(len(category), len(catalog)),
         )
         matrix.sum_duplicates()
+        # Store only observed category/city cells. The terminal prior in the
+        # denominator makes a count informative relative to city popularity.
         matrix.data = np.log1p(matrix.data / (10 * terminal[matrix.indices]))
         categories[column], lifts[column] = category, matrix
     return {
@@ -220,11 +227,14 @@ def score_experts(state, request):
     first = indices[0] if len(indices) else -1
     terminal = roles["terminal_probability"].to_numpy()
     if len(indices):
+        # Halve the contribution for each step farther back in the prefix.
+        # A position's bucket is its distance to the still-hidden endpoint.
         weights = 0.5 ** np.arange(len(indices) - 1, -1, -1)
         lag = np.zeros(len(catalog), dtype=np.float32)
         for position, index in enumerate(indices):
             weight = weights[position] / weights.sum()
             if index < 0:
+                # A city absent from the fitted catalogue has no transition row.
                 lag += weight * prior
                 continue
             bucket = min(len(indices) - position, 4)
@@ -258,6 +268,8 @@ def score_experts(state, request):
         else terminal.copy()
     )
     visit_return = terminal.copy()
+    # Replace only eligible visited-city scores, then renormalize. The return
+    # rates describe each city's role, not a probability distribution alone.
     visit_return[visited] = roles["visit_return_probability"].to_numpy()[visited]
     visit_return /= visit_return.sum()
     origin_return = terminal.copy()
@@ -273,6 +285,8 @@ def score_experts(state, request):
         if category >= 0:
             row = state["context_lifts"][column].getrow(category)
             adjustment[row.indices] += row.data / len(FINAL_CONTEXT_COLUMNS)
+    # Add context as a tempered log-space correction to the lag distribution;
+    # missing or unseen context contributes zero rather than new evidence.
     context = softmax(np.log(lag) + 0.5 * adjustment)
     probabilities = np.vstack(
         [lag, terminal, origin, recent_route, visit_return, origin_return, context]
@@ -289,6 +303,8 @@ def score_experts(state, request):
     last_route_trials = (
         state["source_support"].get(request.city_history[-1], 0) if len(indices) else 0
     )
+    # Gate inputs describe support and agreement available at prediction time.
+    # They contain neither this trip's target nor a held-out outcome.
     features = np.array(
         [
             np.log1p(len(indices)),
@@ -319,11 +335,17 @@ def score_experts(state, request):
 
 # %% 4. Support-aware mixture loss, shared with the GRU extension.
 def _mixture_loss(parameters, design, target_probabilities, lag_floor, l2):
-    """Exact mixture log loss and gradient; unsupported targets stay misses."""
+    """Exact mixture log loss and gradient; unsupported targets stay misses.
+
+    Column 0 is lag. The floor preserves half its weight while the softmax
+    learns how to distribute the remaining weight among all experts.
+    """
     coefficients = parameters.reshape(design.shape[1], target_probabilities.shape[1])
     weights = softmax(design @ coefficients, axis=1)
     residual = (weights * target_probabilities).sum(axis=1)
     mixture = lag_floor * target_probabilities[:, 0] + (1 - lag_floor) * residual
+    # An unseen target has zero probability under every expert. Clipping makes
+    # its finite loss explicit without inventing a reachable catalogue city.
     safe = np.maximum(mixture, 1e-12)
     slopes = coefficients[1:]
     loss = -np.log(safe).mean() + 0.5 * l2 * np.square(slopes).sum()
@@ -334,6 +356,7 @@ def _mixture_loss(parameters, design, target_probabilities, lag_floor, l2):
         / safe[:, None]
         / len(design)
     )
+    # The clipped loss is flat below the floor, so those rows have no gradient.
     derivative[mixture <= 1e-12] = 0
     gradient = design.T @ derivative
     gradient[1:] += l2 * slopes
@@ -360,6 +383,7 @@ def rank_recommendations(experts, gate, requests, neural_batches=None):
         weights = (1 - gate["lag_floor"]) * softmax(
             design @ gate["coefficients"], axis=1
         )
+        # Apply the fixed lag contribution after the learned residual mixture.
         weights[:, 0] += gate["lag_floor"]
         weight_batches.append(weights)
         neural_scores = next(stream) if stream is not None else None
@@ -429,6 +453,8 @@ if __name__ == "__main__":
                 phase,
             )
         )
+        # Cross-fitting lets the gate learn from expert predictions on users
+        # excluded from those experts' fitting data.
         print(
             f"\n{phase}: {len(events):,} stays, {len(requests):,} endpoints; seven experts",
             flush=True,
@@ -526,6 +552,8 @@ if __name__ == "__main__":
             [np.ones(len(features)), scaler.transform(features[list(GATE_FEATURES)])]
         )
         target_probabilities = probabilities[list(EXPERTS)].to_numpy()
+        # Fit the gate on out-of-fold target probabilities, not on predictions
+        # made for the same users who supplied an expert's counts.
         result = minimize(
             _mixture_loss,
             np.zeros(design.shape[1] * len(EXPERTS)),

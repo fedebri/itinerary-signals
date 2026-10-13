@@ -104,6 +104,8 @@ def prepare_training_data(
     )
     valid = valid.fillna(False)
     groups = rows.groupby("utrip_id")
+    # One bad reservation disqualifies its complete trip; dropping only that row
+    # could create a different itinerary or a false endpoint.
     whole_trip_valid = valid.groupby(rows["utrip_id"]).all()
     tied = (
         rows.duplicated(["utrip_id", "checkin"], keep=False)
@@ -129,6 +131,8 @@ def prepare_training_data(
     )
     sizes = events.groupby("utrip_id").size()
     eligible = events.loc[events["utrip_id"].isin(sizes.index[sizes.ge(2)])]
+    # The true last stay supplies the label; every earlier stay remains visible.
+    # Singletons still live in events, where they inform city priors and counts.
     final = eligible.groupby("utrip_id", sort=False).tail(1)
     prefix = eligible.drop(index=final.index).copy()
     prefix["nights"] = (prefix["checkout"] - prefix["checkin"]).dt.days
@@ -175,6 +179,8 @@ def prepare_challenge_requests(
     ordered = rows.sort_values(
         ["utrip_id", "checkin", "checkout"], kind="stable", na_position="first"
     )
+    # Find the benchmark's masked last row before building histories. Its city
+    # and hotel country must never enter predictor features.
     final = ordered.groupby("utrip_id").tail(1)
     final_city = pd.to_numeric(final["city_id"], errors="coerce")
     masked = (
@@ -206,6 +212,8 @@ def prepare_challenge_requests(
     audit["usable_prefix"] = audit["known_stays"].gt(0) & audit[
         ["invalid_city_rows", "invalid_stay_rows", "tied_checkin_rows"]
     ].eq(0).all(axis=1)
+    # Keep every request in the benchmark. An unusable observed prefix becomes
+    # an empty history so downstream experts can fall back to fitted priors.
     # Use raw observed values with the original trimming semantics. Concealed
     # rows never contribute city, country or duration history.
     visible = test_rows.loc[prefix.index, RAW_COLUMNS].astype("string")
@@ -234,7 +242,11 @@ def prepare_challenge_requests(
 
 # %% 4. Neural features: reserved unknown tokens, full histories and five summaries.
 def encode_examples(requests, vocabulary, targets=None):
-    """Encode variable-length prefixes as ordinary tuples for PyTorch batching."""
+    """Encode variable-length prefixes as ordinary tuples for PyTorch batching.
+
+    Index.get_indexer returns -1 for unseen values. Offsets reserve city 0 for
+    padding and 1 for unknown, while other categorical fields use 0 for unknown.
+    """
     context = np.column_stack(
         [
             vocabulary["contexts"][name].get_indexer(requests[name]) + 1
@@ -274,11 +286,15 @@ def collate_stays(examples):
     lengths = []
     for city, country, night, values, distinct, target in examples:
         size = len(city)
+        # Packed GRUs require a positive sequence length even when the usable
+        # prefix is empty; numeric features still record the actual size zero.
         lengths.append(max(size, 1))
         cities.append(torch.as_tensor(city if size else [0], dtype=torch.long))
         countries.append(torch.as_tensor(country if size else [0], dtype=torch.long))
         nights.append(torch.as_tensor(night if size else [0.0], dtype=torch.float32))
         context.append(values)
+        # Log scaling keeps long itineraries and stays from dominating the
+        # embeddings while preserving their ordering and zero values.
         numeric.append(
             np.log1p(
                 [

@@ -56,6 +56,8 @@ class ItineraryGRU(nn.Module):
         super().__init__()
         width = 32
         self.city = nn.Embedding(len(vocabulary["cities"]) + 2, width, padding_idx=0)
+        # City 0 is padding and 1 is the unknown token. The latter starts at
+        # zero; it can appear when inference sees a city outside the catalogue.
         with torch.no_grad():
             self.city.weight[1].zero_()
         self.country = nn.Embedding(len(vocabulary["countries"]) + 1, 8, padding_idx=0)
@@ -83,6 +85,7 @@ class ItineraryGRU(nn.Module):
         self.city_bias = nn.Parameter(torch.zeros(len(vocabulary["cities"])))
 
     def forward(self, batch):
+        """Score every fitted city from the ordered visible prefix and context."""
         city = batch["cities"]
         mask = city.ne(0)
         tokens = (
@@ -100,6 +103,8 @@ class ItineraryGRU(nn.Module):
         )
         lengths = batch["lengths"]
         device_lengths = lengths.to(city.device)
+        # Packing prevents padded positions from changing the GRU summary.
+        # PyTorch expects these lengths on CPU even when tokens are elsewhere.
         packed = pack_padded_sequence(
             tokens, lengths.cpu(), batch_first=True, enforce_sorted=False
         )
@@ -108,6 +113,7 @@ class ItineraryGRU(nn.Module):
         rows = torch.arange(len(city), device=city.device)
         last = tokens[rows, device_lengths - 1]
         penultimate = tokens[rows, (device_lengths - 2).clamp(min=0)]
+        # A one-stay or empty prefix has no genuine penultimate stay.
         penultimate = penultimate * device_lengths.ge(2)[:, None]
         context = torch.cat(
             [layer(batch["context"][:, i]) for i, layer in enumerate(self.context)],
@@ -119,6 +125,8 @@ class ItineraryGRU(nn.Module):
                 dim=1,
             )
         )
+        # Reuse fitted city embeddings as output vectors; padding and unknown
+        # tokens are excluded because neither is a recommendable city.
         logits = trip @ self.city.weight[2:].T + self.city_bias
         return logits
 
@@ -167,6 +175,8 @@ if __name__ == "__main__":
             Path("pipeline/gru_extension.py"),
         )
     }
+    # The signatures bind checkpoints to the actual source and prepared data;
+    # even a comment edit requires a fresh output directory before rerunning.
     # This dictionary records the run; the estimator/optimizer specifications
     # appear literally below where their library APIs are called.
     training_parameters = {
@@ -237,6 +247,8 @@ if __name__ == "__main__":
         )
 
         for fold in [0, 1, 2, "refit"]:
+            # Fold models supply held-user probabilities for gate training.
+            # The refit model uses all fitting users for final inference.
             if fold == "refit":
                 fit_events, fit_requests, fit_labels = events, requests, labels
                 checkpoint = directory / "gru.pt"
@@ -290,6 +302,8 @@ if __name__ == "__main__":
                 optimizer = torch.optim.AdamW(
                     network.parameters(), lr=0.001, weight_decay=0.0001
                 )
+                # The full-city softmax makes each true endpoint compete with
+                # the complete fitted catalogue rather than sampled negatives.
                 loss_function = nn.CrossEntropyLoss()
                 training_log = []
                 for epoch in range(args.epochs):
@@ -361,6 +375,8 @@ if __name__ == "__main__":
                         )
                     values = cached["probabilities"]
                 else:
+                    # A held-user endpoint absent from this fold's catalogue
+                    # contributes zero target probability to the gate loss.
                     values = np.zeros(len(held), dtype=np.float64)
                     offset = 0
                     for distribution in neural_probabilities(neural, held):
@@ -397,6 +413,8 @@ if __name__ == "__main__":
             [part["probabilities"] for part in parts], ignore_index=True
         )
         probabilities["gru"] = neural_targets
+        # Refit only the gate here. Its inputs are the same held-user rows and
+        # support features used by the seven-expert reference.
         scaler = StandardScaler().fit(features[list(GATE_FEATURES)])
         design = np.column_stack(
             [np.ones(len(features)), scaler.transform(features[list(GATE_FEATURES)])]
@@ -445,6 +463,7 @@ if __name__ == "__main__":
         prediction_sha256 = hashlib.sha256(prediction_path.read_bytes()).hexdigest()
 
         # %% 6. Single-target HitRate@4 / NDCG@4 on every held-out request.
+        # Access labels only after both prediction files have been written.
         if phase == "development":
             truth = holdout["labels"][["utrip_id", "target_city_id"]]
         else:
@@ -470,6 +489,7 @@ if __name__ == "__main__":
                 .fillna(False)
             )
             scored[f"{name}_hit"] = matches.any(axis=1).astype(int)
+            # With one relevant endpoint, reciprocal log rank is NDCG@4.
             scored[f"{name}_ndcg"] = matches.mul(
                 1 / np.log2(np.arange(2, 6)), axis=1
             ).sum(axis=1)
@@ -494,6 +514,8 @@ if __name__ == "__main__":
         rng = np.random.default_rng(BOOTSTRAP_SEED)
         bootstrap = np.empty((2000, 4))
         for iteration in range(2000):
+            # Resample users, not requests, to retain within-user dependence;
+            # one shared draw makes the model comparison paired.
             totals = clusters[rng.integers(0, len(clusters), size=len(clusters))].sum(
                 axis=0
             )

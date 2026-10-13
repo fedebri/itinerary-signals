@@ -2,7 +2,7 @@
 
 How can a sequence of observed actions help rank what might be useful next?
 This project studies that question through a concrete task: recommend four
-possible final cities for a hotel trip from its earlier stays and permitted
+possible final cities for a multi-stop trip from its earlier stays and permitted
 reservation context.
 
 The work develops a methodology for combining **interpretable behavioural
