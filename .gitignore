@@ -1,3 +1,10 @@
+# Portable defaults for local/generated data.
+# Reviewed project exceptions below take precedence.
+*.csv
+*.parquet
+*.arrow
+*.jsonl
+
 # Publish the three-stage recommender; keep research, data and weights local.
 /*
 !/.gitignore
@@ -19,6 +26,24 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
-.DS_Store
+
+# Shared credential and OS safety baseline; keep independent of global Git config.
+# Existing reviewed template exceptions follow this block.
 .env
 .env.*
+*.env
+.dev.vars
+.dev.vars.*
+*.pem
+*.key
+*.p12
+*.pfx
+*service-account*.json
+id_rsa
+id_dsa
+id_ecdsa
+id_ed25519
+
+# macOS metadata
+.DS_Store
+.AppleDouble
