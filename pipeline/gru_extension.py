@@ -6,7 +6,6 @@ been run with --public. Only this stage reads held-out requests and public truth
 """
 
 import argparse
-import hashlib
 from importlib.metadata import version
 import json
 from pathlib import Path
@@ -24,25 +23,26 @@ from torch.utils.data import DataLoader
 
 from pipeline.data_features import (
     CITY_COLUMNS,
+    DEVELOPMENT_HOLDOUT,
     FINAL_CONTEXT_COLUMNS,
     NUMERIC_FEATURES,
     collate_stays,
     encode_examples,
+    file_digest,
     final_row_context,
     prepare_challenge_requests,
 )
 from pipeline.base_recommender import (
     EXPERTS,
     GATE_FEATURES,
+    RESULTS_DIR,
     TRAIN_FILES,
     _mixture_loss,
     rank_recommendations,
 )
 
-DEVELOPMENT_HOLDOUT = Path("data/processed/development_holdout.joblib")
 TEST_CSV = Path("data/multi-destination-trip-dataset/test_set.csv")
 TRUTH_CSV = Path("data/multi-destination-trip-dataset/ground_truth.csv")
-RESULTS_DIR = Path("results/gru_showcase")
 TRAINING_SEED = 20261013
 BOOTSTRAP_SEED = 42
 
@@ -168,7 +168,7 @@ if __name__ == "__main__":
         for name in ("numpy", "pandas", "scipy", "scikit-learn", "joblib", "torch")
     }
     source_sha256 = {
-        str(path): hashlib.sha256(path.read_bytes()).hexdigest()
+        str(path): file_digest(path)
         for path in (
             Path("pipeline/data_features.py"),
             Path("pipeline/base_recommender.py"),
@@ -195,6 +195,7 @@ if __name__ == "__main__":
 
     for phase in ["development", "public"] if args.public else ["development"]:
         directory = args.output_dir / phase
+        input_sha256 = {str(TRAIN_FILES[phase]): file_digest(TRAIN_FILES[phase])}
         training = joblib.load(TRAIN_FILES[phase])
         events, requests, labels = (
             training["events"],
@@ -441,13 +442,18 @@ if __name__ == "__main__":
 
         # %% 5. Only now open held-out requests; rank and export before truth.
         if phase == "development":
+            input_sha256[str(DEVELOPMENT_HOLDOUT)] = file_digest(DEVELOPMENT_HOLDOUT)
             holdout = joblib.load(DEVELOPMENT_HOLDOUT)
             evaluation_requests = holdout["requests"].reset_index(drop=True)
         else:
+            input_sha256[str(TEST_CSV)] = file_digest(TEST_CSV)
             evaluation_requests, audit = prepare_challenge_requests(
                 pd.read_csv(TEST_CSV, dtype="string")
             )
             audit.to_csv(directory / "prefix_audit.csv", index=False)
+        lag_predictions, _ = rank_recommendations(
+            base["experts"], None, evaluation_requests
+        )
         endpoint_predictions, endpoint_weights = rank_recommendations(
             base["experts"], base["gate"], evaluation_requests
         )
@@ -457,19 +463,34 @@ if __name__ == "__main__":
             evaluation_requests,
             neural_probabilities(neural, evaluation_requests),
         )
-        endpoint_predictions.to_csv(directory / "endpoint_predictions.csv", index=False)
-        prediction_path = directory / "predictions.csv"
-        predictions.to_csv(prediction_path, index=False)
-        prediction_sha256 = hashlib.sha256(prediction_path.read_bytes()).hexdigest()
+        prediction_sha256_by_model = {}
+        for name, lists, filename in (
+            ("lag_reference", lag_predictions, "lag_predictions.csv"),
+            ("endpoint_reference", endpoint_predictions, "endpoint_predictions.csv"),
+            ("gru_blend", predictions, "predictions.csv"),
+        ):
+            prediction_path = directory / filename
+            lists.to_csv(prediction_path, index=False)
+            prediction_sha256_by_model[name] = file_digest(prediction_path)
 
         # %% 6. Single-target HitRate@4 / NDCG@4 on every held-out request.
-        # Access labels only after both prediction files have been written.
+        # Access labels only after all prediction files have been written.
         if phase == "development":
             truth = holdout["labels"][["utrip_id", "target_city_id"]]
         else:
+            input_sha256[str(TRUTH_CSV)] = file_digest(TRUTH_CSV)
             truth = pd.read_csv(
                 TRUTH_CSV, dtype="string", usecols=["utrip_id", "city_id"]
             ).rename(columns={"city_id": "target_city_id"})
+        truth = truth.apply(lambda column: column.str.strip().replace("", pd.NA))
+        if (
+            truth["utrip_id"].isna().any()
+            or truth["utrip_id"].duplicated().any()
+            or set(truth["utrip_id"]) != set(evaluation_requests["utrip_id"])
+        ):
+            raise ValueError(
+                f"Ground truth must match exactly the {phase} request IDs."
+            )
         scored = evaluation_requests[["utrip_id", "user_id"]].merge(
             truth, on="utrip_id", how="left", validate="one_to_one"
         )
@@ -477,6 +498,7 @@ if __name__ == "__main__":
             raise ValueError(f"Ground truth must cover every {phase} request.")
         model_metrics = {}
         for name, lists in (
+            ("lag_reference", lag_predictions),
             ("endpoint_reference", endpoint_predictions),
             ("gru_blend", predictions),
         ):
@@ -504,15 +526,17 @@ if __name__ == "__main__":
             scored.groupby("user_id", sort=True)
             .agg(
                 requests=("utrip_id", "size"),
+                lag_hit=("lag_reference_hit", "sum"),
                 endpoint_hit=("endpoint_reference_hit", "sum"),
                 gru_hit=("gru_blend_hit", "sum"),
+                lag_ndcg=("lag_reference_ndcg", "sum"),
                 endpoint_ndcg=("endpoint_reference_ndcg", "sum"),
                 gru_ndcg=("gru_blend_ndcg", "sum"),
             )
             .to_numpy(dtype=float)
         )
         rng = np.random.default_rng(BOOTSTRAP_SEED)
-        bootstrap = np.empty((2000, 4))
+        bootstrap = np.empty((2000, 6))
         for iteration in range(2000):
             # Resample users, not requests, to retain within-user dependence;
             # one shared draw makes the model comparison paired.
@@ -522,8 +546,9 @@ if __name__ == "__main__":
             bootstrap[iteration] = 100 * totals[1:] / totals[0]
         intervals = np.quantile(bootstrap, [0.025, 0.975], axis=0)
         for name, hit_column, ndcg_column in (
-            ("endpoint_reference", 0, 2),
-            ("gru_blend", 1, 3),
+            ("lag_reference", 0, 3),
+            ("endpoint_reference", 1, 4),
+            ("gru_blend", 2, 5),
         ):
             model_metrics[name]["hitrate_at_4_95pct_interval_pct"] = intervals[
                 :, hit_column
@@ -532,7 +557,7 @@ if __name__ == "__main__":
                 :, ndcg_column
             ].tolist()
         gain_interval = np.quantile(
-            bootstrap[:, 1] - bootstrap[:, 0], [0.025, 0.975]
+            bootstrap[:, 2] - bootstrap[:, 1], [0.025, 0.975]
         ).tolist()
         metrics = {
             "phase": phase,
@@ -561,9 +586,19 @@ if __name__ == "__main__":
             "lag_floor": 0.5,
             "training_parameters": training_parameters,
             "source_sha256": source_sha256,
-            "prediction_sha256": prediction_sha256,
+            "input_sha256": input_sha256,
+            "base_model_signature": base["signature"],
+            "gru_checkpoint_signature": saved["signature"],
+            "prediction_sha256": prediction_sha256_by_model["gru_blend"],
+            "prediction_sha256_by_model": prediction_sha256_by_model,
             "runtime": runtime,
+            "python_version": sys.version,
+            "command": [sys.executable, "-m", "pipeline.gru_extension", *sys.argv[1:]],
             "torch_threads": torch.get_num_threads(),
+            "training_evaluation_user_overlap": len(
+                set(events["user_id"]).intersection(evaluation_requests["user_id"])
+            ),
+            "development_labels_previously_inspected": phase == "development",
             "public_labels_previously_inspected": phase == "public",
         }
         (directory / "metrics.json").write_text(json.dumps(metrics, indent=2) + "\n")

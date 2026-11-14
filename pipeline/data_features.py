@@ -6,6 +6,7 @@ learned separately inside each fitting fold in stages 2 and 3.
 """
 
 from pathlib import Path
+import hashlib
 import json
 
 import joblib
@@ -50,6 +51,15 @@ NUMERIC_FEATURES = (
     "log_last_nights",
     "log_total_nights",
 )
+
+
+def file_digest(path: Path) -> str:
+    """Return a file's SHA-256 without loading the complete artifact into memory."""
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 # %% 1. Allowed final-row context: six fields, excluding the destination labels.
@@ -159,11 +169,13 @@ def prepare_challenge_requests(
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Keep every masked-test trip, using empty histories for invalid prefixes.
 
-    The last dated row must conceal its city. Its hotel country is never read.
+    Exactly one concealed row must occur at the latest check-in of each trip.
+    Its hotel country is never read. Ties with visible stays use empty histories.
     The separate audit records prefix validity; it is not a predictor input.
     """
-    rows = test_rows[RAW_COLUMNS].astype("string")
-    missing_trip = rows["utrip_id"].isna() | rows["utrip_id"].str.strip().eq("")
+    rows = test_rows[RAW_COLUMNS].astype("string").reset_index(drop=True)
+    rows = rows.apply(lambda column: column.str.strip().replace("", pd.NA))
+    missing_trip = rows["utrip_id"].isna()
     numeric_users = pd.to_numeric(rows["user_id"], errors="coerce")
     invalid_user = (
         numeric_users.isna() | numeric_users.le(0) | numeric_users.mod(1).ne(0)
@@ -179,17 +191,25 @@ def prepare_challenge_requests(
     ordered = rows.sort_values(
         ["utrip_id", "checkin", "checkout"], kind="stable", na_position="first"
     )
-    # Find the benchmark's masked last row before building histories. Its city
-    # and hotel country must never enter predictor features.
-    final = ordered.groupby("utrip_id").tail(1)
-    final_city = pd.to_numeric(final["city_id"], errors="coerce")
-    masked = (
-        final["city_id"].isna() | final["city_id"].str.strip().eq("") | final_city.eq(0)
-    ).fillna(False)
-    if not masked.all() or final["checkin"].isna().any():
+    # Identify the concealed row independently of checkout ordering when the
+    # latest check-in is tied. The tie still invalidates the visible history.
+    numeric_cities = pd.to_numeric(ordered["city_id"], errors="coerce")
+    masked = (ordered["city_id"].isna() | numeric_cities.eq(0)).fillna(False)
+    latest = ordered.groupby("utrip_id")["checkin"].transform("max")
+    final = ordered.loc[masked & ordered["checkin"].eq(latest)]
+    if (
+        len(final) != rows["utrip_id"].nunique()
+        or final["utrip_id"].duplicated().any()
+    ):
         raise ValueError(
-            "Expected a dated final reservation with concealed city (blank or zero) for every trip."
+            "Expected exactly one dated final reservation with concealed city "
+            "(blank or zero) for every trip."
         )
+    # Detect ambiguity before removing the target row: a tie with the concealed
+    # stay makes its preceding history just as unordered as a tie within it.
+    ordered["tied_checkin"] = ordered.duplicated(
+        ["utrip_id", "checkin"], keep=False
+    )
     prefix = ordered.drop(index=final.index).copy()
     numeric_cities = pd.to_numeric(prefix["city_id"], errors="coerce")
     prefix["invalid_city"] = (
@@ -200,7 +220,6 @@ def prepare_challenge_requests(
         | prefix["checkout"].isna()
         | prefix["checkout"].le(prefix["checkin"])
     )
-    prefix["tied_checkin"] = prefix.duplicated(["utrip_id", "checkin"], keep=False)
     summary = prefix.groupby("utrip_id").agg(
         known_stays=("utrip_id", "size"),
         invalid_city_rows=("invalid_city", "sum"),
@@ -214,22 +233,21 @@ def prepare_challenge_requests(
     ].eq(0).all(axis=1)
     # Keep every request in the benchmark. An unusable observed prefix becomes
     # an empty history so downstream experts can fall back to fitted priors.
-    # Use raw observed values with the original trimming semantics. Concealed
-    # rows never contribute city, country or duration history.
-    visible = test_rows.loc[prefix.index, RAW_COLUMNS].astype("string")
-    visible = visible.apply(lambda column: column.str.strip().replace("", pd.NA))
-    visible = visible.loc[
-        visible["utrip_id"].isin(audit.loc[audit["usable_prefix"], "utrip_id"])
-    ]
-    for column in ("checkin", "checkout"):
-        visible[column] = pd.to_datetime(visible[column], format="%Y-%m-%d")
+    visible = prefix.loc[
+        prefix["utrip_id"].isin(audit.loc[audit["usable_prefix"], "utrip_id"])
+    ].copy()
     visible["nights"] = (visible["checkout"] - visible["checkin"]).dt.days
     groups = visible.groupby("utrip_id", sort=False)
     requests = final[["utrip_id", "user_id"]].merge(
-        final_row_context(test_rows.loc[final.index]),
+        final_row_context(final),
         on="utrip_id",
+        how="left",
         validate="one_to_one",
     )
+    if len(requests) != rows["utrip_id"].nunique():
+        raise ValueError(
+            "Benchmark preparation must retain exactly one request per trip."
+        )
     for name, column in [
         ("city_history", "city_id"),
         ("country_history", "hotel_country"),
@@ -320,6 +338,7 @@ def collate_stays(examples):
 
 # %% 5. Load real data, split whole users FIRST, then prepare each partition.
 if __name__ == "__main__":
+    input_sha256 = {str(TRAIN_CSV): file_digest(TRAIN_CSV)}
     raw = pd.read_csv(TRAIN_CSV, dtype="string", usecols=RAW_COLUMNS)
     raw = raw.apply(lambda column: column.str.strip().replace("", pd.NA))
     users = pd.Index(raw["user_id"].dropna().unique()).sort_values()
@@ -372,5 +391,12 @@ if __name__ == "__main__":
         print(f"  {len(requests):,} true-endpoint requests -> {output}", flush=True)
     DATA_SUMMARY.parent.mkdir(parents=True, exist_ok=True)
     DATA_SUMMARY.write_text(
-        json.dumps({"split_seed": SPLIT_SEED, "partitions": summaries}, indent=2) + "\n"
+        json.dumps(
+            {
+                "split_seed": SPLIT_SEED,
+                "input_sha256": input_sha256,
+                "partitions": summaries,
+            },
+            indent=2,
+        ) + "\n"
     )

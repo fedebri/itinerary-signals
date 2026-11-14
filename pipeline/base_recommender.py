@@ -3,11 +3,10 @@
 Run from the repository root after stage 1:
     python -m pipeline.base_recommender
     python -m pipeline.base_recommender --public
-Only prepared training partitions are read. Stage 3 evaluates both models.
+Only prepared training partitions are read. Stage 3 evaluates lag and both blends.
 """
 
 import argparse
-import hashlib
 from importlib.metadata import version
 import json
 from pathlib import Path
@@ -23,13 +22,16 @@ from sklearn.preprocessing import StandardScaler
 
 from pipeline.data_features import (
     CITY_COLUMNS,
+    DEVELOPMENT_TRAIN,
     FINAL_CONTEXT_COLUMNS,
+    PUBLIC_TRAIN,
+    file_digest,
     final_row_context,
 )
 
 TRAIN_FILES = {
-    "development": Path("data/processed/development_train.joblib"),
-    "public": Path("data/processed/public_train.joblib"),
+    "development": DEVELOPMENT_TRAIN,
+    "public": PUBLIC_TRAIN,
 }
 RESULTS_DIR = Path("results/gru_showcase")
 FOLD_SEED = 20261012
@@ -195,7 +197,6 @@ def fit_experts(events, requests, labels):
     return {
         "catalog": catalog,
         "prior": prior,
-        "city_users": city_users,
         "source_support": source_support,
         "lag_counts": lag_counts,
         "lag_totals": {
@@ -364,11 +365,13 @@ def _mixture_loss(parameters, design, target_probabilities, lag_floor, l2):
 
 
 def rank_recommendations(experts, gate, requests, neural_batches=None):
-    """Rank the base mixture or its GRU extension over the same full catalogue.
+    """Rank lag alone, the base mixture or its GRU extension over the catalogue.
 
-    These two callers share score ordering, gate scaling and the lag floor.
+    A None gate selects the lag reference without fitting another model.
     Neural batches, when supplied, follow the request and catalogue order.
     """
+    if gate is None and neural_batches is not None:
+        raise ValueError("Neural probabilities require a fitted mixture gate.")
     stream = iter(neural_batches) if neural_batches is not None else None
     rows, weight_batches = [], []
     for start in range(0, len(requests), 32):
@@ -376,15 +379,19 @@ def rank_recommendations(experts, gate, requests, neural_batches=None):
         scores, features = zip(
             *(score_experts(experts, row) for row in batch.itertuples(index=False))
         )
-        features = pd.DataFrame(features, columns=GATE_FEATURES)
-        design = np.column_stack(
-            [np.ones(len(features)), gate["scaler"].transform(features)]
-        )
-        weights = (1 - gate["lag_floor"]) * softmax(
-            design @ gate["coefficients"], axis=1
-        )
-        # Apply the fixed lag contribution after the learned residual mixture.
-        weights[:, 0] += gate["lag_floor"]
+        if gate is None:
+            weights = np.zeros((len(batch), len(EXPERTS)))
+            weights[:, 0] = 1
+        else:
+            features = pd.DataFrame(features, columns=GATE_FEATURES)
+            design = np.column_stack(
+                [np.ones(len(features)), gate["scaler"].transform(features)]
+            )
+            weights = (1 - gate["lag_floor"]) * softmax(
+                design @ gate["coefficients"], axis=1
+            )
+            # Apply the fixed lag contribution after the learned residual mixture.
+            weights[:, 0] += gate["lag_floor"]
         weight_batches.append(weights)
         neural_scores = next(stream) if stream is not None else None
         for offset, (trip, statistical_scores) in enumerate(
@@ -422,7 +429,7 @@ if __name__ == "__main__":
         for name in ("numpy", "pandas", "scipy", "scikit-learn", "joblib")
     }
     source_sha256 = {
-        str(path): hashlib.sha256(path.read_bytes()).hexdigest()
+        str(path): file_digest(path)
         for path in (
             Path("pipeline/data_features.py"),
             Path("pipeline/base_recommender.py"),
