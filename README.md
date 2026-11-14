@@ -156,6 +156,10 @@ trips on one side avoids sharing that user's travel history across fitting and
 evaluation. Three inner user folds (seed 20261012) supply gate-training predictions
 for at most 20,000 users; all other-fold users still supply fitting evidence.
 Vocabularies, counts and neural weights are learned within each fitting fold.
+The seed-43 development results were inspected during earlier research and
+informed model comparison. The reported experiment used one neural initialization
+seed. User separation prevents overlap within a fit; it does not make this reused
+development set an untouched test set or measure variability across training seeds.
 
 The GRU uses AdamW, learning rate 0.001, weight decay 0.0001, batch size 128,
 12 epochs, gradient clipping 5 and seed 20261013. Both training and evaluation
@@ -181,9 +185,11 @@ Development contains 43,647 held-user trips; the public benchmark contains
 
 The GRU blend achieves public **NDCG@4 of 42.00%** and hits **36,553 targets**,
 adding **854 hits (+1.21 percentage points)** over the endpoint reference.
-The exploratory 95% gain interval is **[+1.03, +1.40] pp**, from 2,000 paired
+The exploratory 95% gain interval is **[+1.02, +1.41] pp**, from 2,000 paired
 user-cluster bootstrap resamples (seed 42). Resampling whole users preserves
 within-user dependence when comparing the two models.
+These intervals do not account for model selection, repeated comparisons or
+variation between training runs.
 
 This is an incremental improvement in endpoint reconstruction. The comparisons
 support testing complementary count and neural representations on this dataset;
@@ -191,11 +197,23 @@ they do not isolate the value of every feature or expert. Mean gate weights
 describe model behaviour, not causal attribution. Individual components would
 need ablations before claiming that each earns its complexity.
 
-These scores come from the original full training run. Public labels were
-previously inspected, so the benchmark is descriptive rather than an independent
-test or official challenge placing. The task measures recovery of a recorded
-endpoint. Anonymous city IDs provide no distances, and the dataset supplies no
-availability information; offline accuracy does not establish online usefulness.
+The full pipeline rerun reviewed on 14 November 2026 reproduced all three models’
+development and public point scores. Its public paired gain interval is reported
+above; the historical interval was [+1.03, +1.40] pp. The
+[current run evidence](results/published/2026-11-14/README.md) records aggregate
+metrics, source/input fingerprints and fold audits. The small
+[published evidence snapshot](results/published/2026-10-13/README.md) contains
+the aggregate scores, original protocol, historical selection record and source
+fingerprints. It is preserved evidence from that run, not a new full-data run of
+the current scripts.
+
+Public labels were previously inspected, so the benchmark is descriptive rather
+than an independent test or official challenge placing. Unlike the development
+split, the public benchmark contains **9,496 users also present in training**, with no overlapping
+trip IDs; it is not an exclusively unseen-user evaluation. The task measures
+recovery of a recorded endpoint. Anonymous city IDs provide no distances, and
+the dataset supplies no availability information; offline accuracy does not
+establish online usefulness.
 
 ## From the experiment to application hypotheses
 
@@ -234,7 +252,7 @@ follow the architecture above; [Makefile](Makefile) runs the stages in order.
 |---|---|---|
 | 1. Data and features | [data_features.py](pipeline/data_features.py) | CSV loading, user split, cleaning, prefix/label separation, allowed context, categorical encoding and neural summaries. |
 | 2. Base recommender | [base_recommender.py](pipeline/base_recommender.py) | Seven experts, city roles and returns, support features, user cross-fitting, mixture loss and base gate. |
-| 3. GRU extension and evaluation | [gru_extension.py](pipeline/gru_extension.py) | Network architecture, training loop, eight-expert gate, prediction, metrics and paired intervals. |
+| 3. GRU extension and evaluation | [gru_extension.py](pipeline/gru_extension.py) | Network architecture, training loop, eight-expert gate, lag/statistical/GRU predictions, metrics and paired intervals. |
 
 Data preparation uses pandas. Sparse counts, softmax and optimization use SciPy;
 folds and scaling use scikit-learn. PyTorch supplies the GRU and training APIs.
@@ -265,8 +283,9 @@ make PUBLIC=--public
 
 Each phase fits three fold GRUs and one full-data GRU, using four CPU threads.
 Completed folds and networks reload from cache. `make EPOCHS=1` uses a shorter
-training budget for a smoke run. When changing that budget, give both model
-stages the same fresh `--output-dir` to keep cached runs separate.
+training budget for a smoke run. When changing that budget or pipeline source,
+give both model stages the same fresh `--output-dir` to keep cached runs separate;
+source changes invalidate existing checkpoints.
 
 The stages can also be run individually:
 
@@ -276,19 +295,44 @@ python -m pipeline.base_recommender
 python -m pipeline.gru_extension
 ```
 
+For a full rerun of both phases after source changes, use an unused output
+directory for both model stages, for example:
+
+```bash
+python -m pipeline.data_features
+python -m pipeline.base_recommender --public --output-dir results/gru_fresh_run
+python -m pipeline.gru_extension --public --output-dir results/gru_fresh_run
+```
+
+Inspect `data_summary.json` for input/usable stay counts, the fold audit CSVs for
+user overlap, and each phase's `metrics.json` for request counts, input fingerprints,
+unsupported targets, the three models' scores and the paired GRU-versus-endpoint gain.
+
 File paths are declared at the top of the scripts. Prepared partitions go to
 `data/processed/`; predictions, metrics, training losses, mean gate weights and
 fold audits go to `results/gru_showcase/`. Raw data, weights and historical
 experiments stay local. Only the third stage opens evaluation requests.
+Each phase exports `lag_predictions.csv`, `endpoint_predictions.csv` and
+`predictions.csv` (the GRU blend), with all three models' scores in `metrics.json`.
+Reports include SHA-256 fingerprints of prepared training data and evaluation
+inputs, model signatures, prediction hashes, the command, Python/package versions,
+and the observed training/evaluation user overlap. `data_summary.json` identifies
+the raw training file and records partition counts before and after filtering.
+Benchmark identifiers are trimmed before grouping. Invalid or tied prefixes use
+empty-history fallback, including ties with the concealed final stay; an unmasked
+final row is rejected. Every normalized benchmark trip must retain one request,
+and ground truth must match that request population exactly.
 
-Run the integration tests with:
+Run the tests with:
 
 ```bash
 make test
 ```
 
-Tests execute the three stages on local CSV fixtures and check filtering, user
-separation, prefix/label boundaries, output schemas and cache reload. The recorded
+Tests execute the three stages on synthetic CSV fixtures and check filtering, user
+separation, prefix/label boundaries, identifier normalization, final-row ties,
+lag rankings, output schemas, input fingerprints, cache reload and the published
+evidence manifest. No project dataset is required. The recorded
 model run used Python 3.10.6 and PyTorch 2.7.1 on CPU.
 
 Dataset: Goldenberg and Levin, *Booking.com Multi-Destination Trips Dataset*,
@@ -299,6 +343,4 @@ The neural city head and GRU adapt ideas from
 
 ## License
 
-The original code and documentation in this repository are licensed under
-[MIT](LICENSE). Booking.com's dataset is not covered by this license; obtain it
-from the source above and follow its separate terms.
+See [LICENSE](LICENSE).

@@ -14,6 +14,25 @@
 !/Makefile
 !/pipeline/
 !/tests/
+!/results/
+
+# Only the small, frozen aggregate evidence snapshot is published.
+/results/*
+!/results/published/
+/results/published/*
+!/results/published/2026-10-13/
+/results/published/2026-10-13/*
+!/results/published/2026-10-13/README.md
+!/results/published/2026-10-13/manifest.json
+!/results/published/2026-10-13/data_audit.csv
+!/results/published/2026-10-13/development_scores.csv
+!/results/published/2026-10-13/public_scores.csv
+!/results/published/2026-10-13/gru_gate_weights.csv
+!/results/published/2026-10-13/public_paired_comparisons.csv
+!/results/published/2026-10-13/neural_protocol.json
+!/results/published/2026-10-13/neural_selection.json
+!/results/published/2026-10-13/public_evaluation_record.json
+!/results/published/2026-10-13/public_verification.json
 
 /pipeline/*
 !/pipeline/data_features.py
@@ -28,7 +47,6 @@ __pycache__/
 .pytest_cache/
 
 # Shared credential and OS safety baseline; keep independent of global Git config.
-# Existing reviewed template exceptions follow this block.
 .env
 .env.*
 *.env
@@ -47,3 +65,16 @@ id_ed25519
 # macOS metadata
 .DS_Store
 .AppleDouble
+
+# Reviewed aggregate evidence from the full rerun.
+!/results/published/2026-11-14/
+/results/published/2026-11-14/*
+!/results/published/2026-11-14/data_summary.json
+!/results/published/2026-11-14/development_gru_oof_audit.csv
+!/results/published/2026-11-14/development_metrics.json
+!/results/published/2026-11-14/development_oof_audit.csv
+!/results/published/2026-11-14/manifest.json
+!/results/published/2026-11-14/public_gru_oof_audit.csv
+!/results/published/2026-11-14/public_metrics.json
+!/results/published/2026-11-14/public_oof_audit.csv
+!/results/published/2026-11-14/README.md

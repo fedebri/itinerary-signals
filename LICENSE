@@ -1,6 +1,6 @@
 MIT License
 
-Copyright (c) 2026 fedebri
+Copyright (c) 2026 Federico Maria Brignoli
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -19,3 +19,41 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+------------------------------------------------------------------------
+Scope and third-party notices
+------------------------------------------------------------------------
+
+The MIT License above applies to original code, notebooks, configuration,
+documentation, analyses, visualizations, and other original project materials
+contributed to this project, subject to the third-party exclusions below.
+These notices identify the scope of that grant; they do not add restrictions
+to the MIT-licensed original materials.
+
+Booking.com Multi-Destination Trips Dataset
+
+The dataset, including train_set.csv, test_set.csv, and ground_truth.csv,
+is Booking.com material and is excluded from the MIT grant above. Obtain it
+from the official source and follow its separate Terms and Conditions:
+https://github.com/bookingcom/ml-dataset-mdt#terms-and-conditions
+
+Those terms exclude commercial reuse, uses harmful to or competitive with
+Booking.com or Booking Holdings, and uses that violate law or regulation.
+These are restrictions on the third-party dataset, not on this project's
+original MIT-licensed code and documentation.
+
+Dataset attribution: Dmitri Goldenberg and Pavel Levin (2021),
+"Booking.com Multi-Destination Trips Dataset," SIGIR 2021.
+https://doi.org/10.1145/3404835.3463240
+
+Referenced publications and external implementations, including the NVIDIA
+challenge solution discussed in the README, retain their own rights. The
+citation of a method does not relicense source text, figures, or external code.
+
+Third-party datasets, libraries, pretrained models, fonts, images, documents,
+and other external materials retain their own copyright notices, licenses,
+terms, and attribution requirements. The MIT License above does not grant
+rights to those materials or replace their original terms. Preserve supplied
+third-party notices when using or redistributing the corresponding materials.
+Original analysis does not relicense source data or third-party content
+reproduced in results.
